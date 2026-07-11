@@ -342,6 +342,18 @@
       snapshot["settings:" + key] = json;
       changed = true;
     }
+    // Sélection "saisie rapide" : une clé settings PAR PROF (quickEntry:SMITH…)
+    // pour que la sélection de chacun soit indépendante des 3 autres.
+    if (state.quickEntry !== undefined) {
+      const json = JSON.stringify(state.quickEntry);
+      if (snapshot["settings:quickEntry"] !== json) {
+        lastPushAt["settings"] = Date.now();
+        const { error } = await sb.from("settings").upsert({ key: qeSettingsKey(), value: state.quickEntry });
+        if (error) throw new Error("settings/quickEntry : " + error.message);
+        snapshot["settings:quickEntry"] = json;
+        changed = true;
+      }
+    }
     return changed;
   }
 
@@ -415,6 +427,10 @@
           if (SETTINGS_KEYS.includes(r.key)) {
             state[r.key] = r.value;
             snapshot["settings:" + r.key] = JSON.stringify(r.value);
+          } else if (r.key === qeSettingsKey()) {
+            // Sélection "saisie rapide" du même prof, modifiée sur un autre appareil
+            state.quickEntry = r.value;
+            snapshot["settings:quickEntry"] = JSON.stringify(r.value);
           }
         });
       } else {
@@ -474,6 +490,222 @@
   }
 
   /* ==========================================================================
+   * 12) SAISIE RAPIDE (onglet #quickEntryView) — mode tactile pour la classe
+   *     - state.quickEntry = { student: "NOM Prénom" | null, sequence: id | null }
+   *       persisté dans localStorage (via saveState) ET dans Supabase
+   *       (table settings, clé "quickEntry:<PROF>", donc propre à chaque prof).
+   *     - Chaque appui sur un bouton couleur écrit IMMÉDIATEMENT :
+   *         séquence sélectionnée -> state.progressions (table progressions)
+   *         pas de séquence       -> state.manual (table manual_evaluations)
+   *       puis saveState() => localStorage + push différentiel Supabase.
+   * ========================================================================*/
+  const QE_STATUSES = [
+    { key: "N", label: "Non évalué" },
+    { key: "R", label: "Rouge" },
+    { key: "O", label: "Orange" },
+    { key: "Y", label: "Jaune" },
+    { key: "G", label: "Vert" },
+  ];
+
+  function qeSettingsKey() { return "quickEntry:" + (currentTeacher || "anon"); }
+
+  function qeEsc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+  }
+
+  function qeFindDetail(id) {
+    return (state.sequences || []).find(x => x.id === id) ||
+           (state.itProjects || []).find(x => x.id === id) || null;
+  }
+
+  // Garantit un state.quickEntry valide (références disparues -> null)
+  function ensureQuickEntryState() {
+    if (!state.quickEntry || typeof state.quickEntry !== "object")
+      state.quickEntry = { student: null, sequence: null };
+    if (state.quickEntry.student &&
+        !(state.students || []).some(s => s.name === state.quickEntry.student))
+      state.quickEntry.student = null;
+    if (state.quickEntry.sequence && !qeFindDetail(state.quickEntry.sequence))
+      state.quickEntry.sequence = null;
+  }
+
+  // ------- Sélection élève / séquence (appelées par le bottom sheet) -------
+  window.selectStudentForQuickEntry = function (name) {
+    ensureQuickEntryState();
+    state.quickEntry.student = name || null;
+    // Si la séquence en cours n'est pas du niveau du nouvel élève, on la vide
+    const stu = (state.students || []).find(s => s.name === name);
+    if (stu && stu.level && state.quickEntry.sequence) {
+      const gi = (state.ganttItems || []).find(x => x.id === state.quickEntry.sequence);
+      if (gi && !gi.row.startsWith(stu.level)) state.quickEntry.sequence = null;
+    }
+    window.saveState();               // localStorage + Supabase (différé 800 ms)
+    closeQuickPicker();
+    window.renderQuickEntry();
+  };
+
+  window.selectSequenceForQuickEntry = function (id) {
+    ensureQuickEntryState();
+    state.quickEntry.sequence = id || null;
+    window.saveState();
+    closeQuickPicker();
+    window.renderQuickEntry();
+  };
+
+  // ------- Écriture d'un statut (auto-save immédiat, pas de bouton Valider) -------
+  window.updateCompetencyStatus = function (code, status) {
+    ensureQuickEntryState();
+    const q = state.quickEntry;
+    if (!q.student || !code || !QE_STATUSES.some(s => s.key === status)) return;
+    if (q.sequence) {
+      // Logique existante : séquence sélectionnée -> progression par séquence
+      const ex = (state.progressions || []).find(p =>
+        p.student === q.student && p.competencyCode === code && p.itemId === q.sequence);
+      if (ex) ex.status = status;
+      else state.progressions.push({ student: q.student, competencyCode: code, itemId: q.sequence, status });
+    } else {
+      // Pas de séquence -> évaluation manuelle globale
+      const scoreMap = { N: 0, R: 1, O: 2, Y: 3, G: 4 };
+      const row = { student: q.student, competencyCode: code, status, score: scoreMap[status] || 0 };
+      const i = (state.manual || []).findIndex(m => m.student === q.student && m.competencyCode === code);
+      if (i >= 0) state.manual[i] = row; else state.manual.push(row);
+    }
+    window.saveState();               // localStorage + push Supabase automatique
+
+    // Retour visuel immédiat sur la carte concernée (préserve la position de scroll)
+    const card = document.querySelector('#quickEntryList .qeCompCard[data-code="' + code + '"]');
+    if (card) card.querySelectorAll(".qeStatusBtn").forEach(b =>
+      b.classList.toggle("qeActive", b.dataset.status === status));
+
+    // Les autres vues restent cohérentes
+    try { if (typeof window.renderStudent === "function") window.renderStudent(); } catch (e) {}
+    try { if (typeof window.renderClass === "function") window.renderClass(); } catch (e) {}
+  };
+
+  // ------- Rendu de l'onglet -------
+  window.renderQuickEntry = function () {
+    const list = document.getElementById("quickEntryList");
+    if (!list) return;                 // section absente : ne rien faire
+    ensureQuickEntryState();
+    const q = state.quickEntry;
+    const detail = q.sequence ? qeFindDetail(q.sequence) : null;
+
+    const stuEl = document.getElementById("qeCurrentStudent");
+    const seqEl = document.getElementById("qeCurrentSequence");
+    if (stuEl) { stuEl.textContent = q.student || "Aucun élève"; stuEl.classList.toggle("empty", !q.student); }
+    if (seqEl) { seqEl.textContent = detail ? detail.title : "Aucune séquence"; seqEl.classList.toggle("empty", !detail); }
+
+    if (!q.student || !detail) {
+      list.innerHTML = '<div class="qeHint">Choisis un <strong>élève</strong> et une <strong>séquence</strong> ' +
+        "avec les boutons ci-dessus.<br>Chaque appui sur une couleur est enregistré immédiatement.</div>";
+      return;
+    }
+    const codes = (detail.competencies || []).slice().sort((a, b) => a.localeCompare(b, "fr"));
+    if (!codes.length) {
+      list.innerHTML = '<div class="qeHint">Aucune compétence associée à cette séquence.</div>';
+      return;
+    }
+    list.innerHTML = codes.map(code => {
+      const prog = (state.progressions || []).find(p =>
+        p.student === q.student && p.competencyCode === code && p.itemId === q.sequence);
+      const cur = prog ? prog.status : "N";
+      const label = (typeof window.competencyLabel === "function") ? window.competencyLabel(code) : code;
+      return '<div class="qeCompCard" data-code="' + qeEsc(code) + '">' +
+        '<p class="qeCompName">' + qeEsc(code) + "</p>" +
+        '<p class="qeCompLabel">' + qeEsc(label) + "</p>" +
+        '<div class="qeStatusRow">' +
+        QE_STATUSES.map(s =>
+          '<button type="button" class="qeStatusBtn qe' + s.key + (cur === s.key ? " qeActive" : "") +
+          '" data-status="' + s.key + '" aria-label="' + s.label + '" title="' + s.label + '">' +
+          s.key + "</button>").join("") +
+        "</div></div>";
+    }).join("");
+    list.querySelectorAll(".qeCompCard").forEach(card => {
+      card.querySelectorAll(".qeStatusBtn").forEach(btn =>
+        btn.addEventListener("click", () =>
+          window.updateCompetencyStatus(card.dataset.code, btn.dataset.status)));
+    });
+  };
+
+  // ------- Bottom sheet : liste des élèves ou des séquences -------
+  function openQuickPicker(type) {
+    ensureQuickEntryState();
+    const ov = document.getElementById("qeOverlay");
+    const body = document.getElementById("qeSheetBody");
+    const title = document.getElementById("qeSheetTitle");
+    if (!ov || !body || !title) return;
+    const q = state.quickEntry;
+
+    if (type === "student") {
+      title.textContent = "Choisir un élève";
+      const stus = (state.students || []).slice().sort((a, b) =>
+        (a.group || "").localeCompare(b.group || "", "fr") || a.name.localeCompare(b.name, "fr"));
+      let html = "", lastGroup = null;
+      stus.forEach(s => {
+        if (s.group !== lastGroup) {
+          lastGroup = s.group;
+          html += '<div class="qeSheetGroup">' + qeEsc(s.group || s.level || "Sans groupe") + "</div>";
+        }
+        html += '<button type="button" class="qeSheetItem' + (q.student === s.name ? " qeSelected" : "") +
+          '" data-pick-student="' + qeEsc(s.name) + '"><span>' + qeEsc(s.name) +
+          "</span><small>" + qeEsc(s.level || "") + "</small></button>";
+      });
+      body.innerHTML = html || '<div class="qeHint">Aucun élève.</div>';
+      body.querySelectorAll("[data-pick-student]").forEach(b =>
+        b.addEventListener("click", () => window.selectStudentForQuickEntry(b.dataset.pickStudent)));
+    } else {
+      title.textContent = "Choisir une séquence";
+      const stu = (state.students || []).find(s => s.name === q.student);
+      let items = (state.ganttItems || []).slice().sort((a, b) => a.startWeek - b.startWeek);
+      if (stu && stu.level) items = items.filter(x => x.row.startsWith(stu.level)); // niveau de l'élève
+      let html = "", lastRow = null;
+      items.forEach(gi => {
+        const d = qeFindDetail(gi.id);
+        if (!d) return;
+        if (gi.row !== lastRow) { lastRow = gi.row; html += '<div class="qeSheetGroup">' + qeEsc(gi.row) + "</div>"; }
+        const n = (d.competencies || []).length;
+        html += '<button type="button" class="qeSheetItem' + (q.sequence === gi.id ? " qeSelected" : "") +
+          '" data-pick-sequence="' + qeEsc(gi.id) + '"><span>' + qeEsc(d.title) +
+          "</span><small>" + qeEsc(gi.id) + " · " + n + " comp.</small></button>";
+      });
+      body.innerHTML = html || '<div class="qeHint">' +
+        (stu && stu.level ? "Aucune séquence pour le niveau " + qeEsc(stu.level) + "." : "Aucune séquence.") + "</div>";
+      body.querySelectorAll("[data-pick-sequence]").forEach(b =>
+        b.addEventListener("click", () => window.selectSequenceForQuickEntry(b.dataset.pickSequence)));
+    }
+    ov.classList.add("visible");
+    body.scrollTop = 0;
+  }
+
+  function closeQuickPicker() {
+    const ov = document.getElementById("qeOverlay");
+    if (ov) ov.classList.remove("visible");
+  }
+
+  // ------- Branchement des événements + intégration au renderAll() global -------
+  (function initQuickEntry() {
+    const pickStu = document.getElementById("qePickStudentBtn");
+    const pickSeq = document.getElementById("qePickSequenceBtn");
+    const closeBtn = document.getElementById("qeSheetClose");
+    const ov = document.getElementById("qeOverlay");
+    if (pickStu) pickStu.addEventListener("click", () => openQuickPicker("student"));
+    if (pickSeq) pickSeq.addEventListener("click", () => openQuickPicker("sequence"));
+    if (closeBtn) closeBtn.addEventListener("click", closeQuickPicker);
+    if (ov) ov.addEventListener("click", e => { if (e.target === ov) closeQuickPicker(); });
+    // renderAll() (défini dans index.html) rafraîchit désormais aussi cet onglet,
+    // y compris lors des mises à jour temps réel venant des autres profs.
+    const originalRenderAll = window.renderAll;
+    if (typeof originalRenderAll === "function") {
+      window.renderAll = function () {
+        originalRenderAll();
+        try { window.renderQuickEntry(); } catch (e) { console.error("[STI2D] renderQuickEntry :", e); }
+      };
+    }
+    try { window.renderQuickEntry(); } catch (e) {}
+  })();
+
+  /* ==========================================================================
    * 11) DÉMARRAGE
    * ========================================================================*/
   async function boot() {
@@ -504,6 +736,12 @@
       if (!state.selectedSequenceId)
         state.selectedSequenceId = (state.ganttItems || [])[0]?.id || null;
       rebuildSnapshot();
+      // Restaurer la sélection "saisie rapide" du prof connecté (multi-appareils)
+      try {
+        const { data: qe } = await sb.from("settings").select("value").eq("key", qeSettingsKey()).maybeSingle();
+        if (qe && qe.value) state.quickEntry = qe.value;
+        snapshot["settings:quickEntry"] = JSON.stringify(state.quickEntry);
+      } catch (e) { /* clé absente : première utilisation */ }
       try { originalSaveState(); } catch (e) {}   // rafraîchit le cache local
       if (typeof window.populateFilters === "function") window.populateFilters();
       if (typeof window.renderAll === "function") window.renderAll();
