@@ -4,8 +4,10 @@
  * PRINCIPE "DROP-IN" : ce fichier se charge APRÈS le script principal du HTML
  * et ne demande AUCUNE modification du code existant, à part 2 balises <script>.
  *
- *  - Au démarrage : connexion (compte partagé), lecture de l'état sur Supabase,
- *    remplacement du contenu de `state`, re-rendu de l'interface.
+ *  - Au démarrage : écran de connexion INDIVIDUEL (1 compte par prof),
+ *    lecture de l'état sur Supabase, remplacement du contenu de `state`,
+ *    re-rendu de l'interface. La session est mémorisée (localStorage) :
+ *    chaque prof ne saisit son mot de passe qu'une fois par navigateur.
  *  - Ensuite : `saveState()` (appelé partout dans l'appli) est enveloppé pour
  *    continuer à écrire dans localStorage (cache hors-ligne) ET pousser vers
  *    Supabase, de façon différentielle (seules les lignes modifiées partent).
@@ -23,18 +25,23 @@
   "use strict";
 
   /* ==========================================================================
-   * 1) CONFIGURATION — À REMPLIR PAR DAMIEN
+   * 1) CONFIGURATION
    *    Supabase > Project Settings > API :
    *      - Project URL  -> SUPABASE_URL
    *      - anon public  -> SUPABASE_ANON_KEY
-   *    Supabase > Authentication > Users > Add user : créer le compte partagé,
-   *    puis reporter l'email ci-dessous. Le mot de passe sera demandé une
-   *    seule fois par navigateur (la session est mémorisée).
+   *    Les 4 comptes profs doivent exister dans Supabase > Authentication >
+   *    Users (voir supabase/create_users.sql ou la doc de déploiement).
    * ========================================================================*/
-  const SUPABASE_URL = "https://zkggtmcxiuzcwlffigro.supabase.co"; // <-- À REMPLACER
-  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InprZ2d0bWN4aXV6Y3dsZmZpZ3JvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM2Mzg4MDEsImV4cCI6MjA5OTIxNDgwMX0.vtbVL-jEA5EM0ybiG9ZSTjR01OejBADjHCdDhfj01As";       // <-- À REMPLACER
-  const SHARED_EMAIL = "smithdam41@gmail.com";        // <-- compte partagé
-  const SHARED_PASSWORD = "";  // laisser vide => demandé à la 1re connexion
+  const SUPABASE_URL = "https://zkggtmcxiuzcwlffigro.supabase.co";
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InprZ2d0bWN4aXV6Y3dsZmZpZ3JvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM2Mzg4MDEsImV4cCI6MjA5OTIxNDgwMX0.vtbVL-jEA5EM0ybiG9ZSTjR01OejBADjHCdDhfj01As";
+
+  // Les 4 profs : email de connexion -> nom affiché dans l'interface
+  const TEACHERS = {
+    "damien.smith@ac-reunion.fr":        "SMITH",
+    "pierre-yves.huraux@ac-reunion.fr":  "HURAUX",
+    "davy.thiaw-woaye@ac-reunion.fr":    "THIAW-WOAYE",
+    "christopher.nativel@ac-reunion.fr": "NATIVEL",
+  };
 
   /* ==========================================================================
    * 2) INITIALISATION DU CLIENT
@@ -135,16 +142,98 @@
                       "itProjects", "progressions", "manual", "prefill"];
 
   /* ==========================================================================
-   * 4) AUTHENTIFICATION — compte partagé (session mémorisée par supabase-js)
+   * 4) AUTHENTIFICATION — login individuel par prof
+   *    - Session mémorisée par supabase-js dans localStorage : le mot de
+   *      passe n'est demandé qu'une fois par navigateur (ou après logout).
+   *    - Un écran de connexion plein-écran est injecté PAR-DESSUS l'appli :
+   *      index.html reste inchangé.
    * ========================================================================*/
+  const LAST_EMAIL_KEY = "sti2d-last-email";
+  let currentTeacher = null;
+
+  function teacherNameOf(session) {
+    const email = ((session && session.user && session.user.email) || "").toLowerCase();
+    return TEACHERS[email] || email || "?";
+  }
+
+  function showLoginOverlay() {
+    return new Promise(resolve => {
+      const ov = document.createElement("div");
+      ov.id = "sti2d-login";
+      ov.style.cssText = "position:fixed;inset:0;z-index:99999;display:flex;" +
+        "align-items:center;justify-content:center;background:#1f2937;" +
+        "font-family:system-ui,sans-serif";
+      const last = (localStorage.getItem(LAST_EMAIL_KEY) || "").toLowerCase();
+      const options = Object.keys(TEACHERS).map(email =>
+        '<option value="' + email + '"' + (email === last ? " selected" : "") + ">" +
+        TEACHERS[email] + " — " + email + "</option>").join("");
+      ov.innerHTML =
+        '<form style="background:#fff;padding:28px 32px;border-radius:12px;' +
+          'box-shadow:0 10px 40px rgba(0,0,0,.4);width:380px;max-width:92vw">' +
+          '<h2 style="margin:0 0 4px;font-size:18px;color:#111827">Suivi des compétences STI2D</h2>' +
+          '<p style="margin:0 0 18px;color:#6b7280;font-size:13px">Connexion enseignant</p>' +
+          '<label style="font-size:13px;color:#374151">Enseignant</label>' +
+          '<select id="sti2d-email" style="width:100%;box-sizing:border-box;margin:4px 0 12px;' +
+            'padding:8px;border:1px solid #d1d5db;border-radius:6px;font-size:14px">' +
+            options + "</select>" +
+          '<label style="font-size:13px;color:#374151">Mot de passe</label>' +
+          '<input id="sti2d-pwd" type="password" autocomplete="current-password" required ' +
+            'style="width:100%;box-sizing:border-box;margin:4px 0 6px;padding:8px;' +
+            'border:1px solid #d1d5db;border-radius:6px;font-size:14px">' +
+          '<div id="sti2d-err" style="color:#c0392b;font-size:12px;min-height:16px;margin-bottom:8px"></div>' +
+          '<button type="submit" style="width:100%;padding:10px;border:0;border-radius:6px;' +
+            'background:#2563eb;color:#fff;font-size:15px;cursor:pointer">Se connecter</button>' +
+        "</form>";
+      document.body.appendChild(ov);
+      ov.querySelector("#sti2d-pwd").focus();
+
+      const form = ov.querySelector("form");
+      const err = ov.querySelector("#sti2d-err");
+      const btn = form.querySelector("button");
+      form.addEventListener("submit", async ev => {
+        ev.preventDefault();
+        const email = ov.querySelector("#sti2d-email").value;
+        const pwd = ov.querySelector("#sti2d-pwd").value;
+        err.textContent = "";
+        btn.disabled = true; btn.textContent = "Connexion…";
+        const { data, error } = await sb.auth.signInWithPassword({ email, password: pwd });
+        btn.disabled = false; btn.textContent = "Se connecter";
+        if (error) {
+          err.textContent = (error.message === "Invalid login credentials")
+            ? "Email ou mot de passe incorrect." : "Échec : " + error.message;
+          return;
+        }
+        localStorage.setItem(LAST_EMAIL_KEY, email);
+        ov.remove();
+        resolve(data.session);
+      });
+    });
+  }
+
   async function ensureAuth() {
     const { data: { session } } = await sb.auth.getSession();
-    if (session) return session;
-    let pwd = SHARED_PASSWORD;
-    if (!pwd) pwd = window.prompt("Connexion Supabase — mot de passe du compte profs (" + SHARED_EMAIL + ") :") || "";
-    const { data, error } = await sb.auth.signInWithPassword({ email: SHARED_EMAIL, password: pwd });
-    if (error) { setBadge("erreur connexion", "#c0392b"); alert("Connexion Supabase impossible : " + error.message); throw error; }
-    return data.session;
+    if (session) return session;          // session mémorisée -> pas de login
+    return await showLoginOverlay();      // sinon : écran de connexion
+  }
+
+  // Petit bouton "prof connecté / déconnexion" en bas à gauche
+  let logoutBtn;
+  function showLogoutButton(session) {
+    currentTeacher = teacherNameOf(session);
+    if (!logoutBtn) {
+      logoutBtn = document.createElement("button");
+      logoutBtn.style.cssText = "position:fixed;bottom:8px;left:8px;z-index:9999;" +
+        "padding:4px 10px;border-radius:12px;font:12px sans-serif;border:0;" +
+        "background:#374151;color:#fff;opacity:.85;cursor:pointer";
+      logoutBtn.title = "Se déconnecter";
+      logoutBtn.addEventListener("click", async () => {
+        if (!window.confirm("Se déconnecter (" + currentTeacher + ") ?")) return;
+        await sb.auth.signOut();
+        location.reload();
+      });
+      document.body.appendChild(logoutBtn);
+    }
+    logoutBtn.textContent = "👤 " + currentTeacher + " — déconnexion";
   }
 
   /* ==========================================================================
@@ -383,7 +472,8 @@
    * ========================================================================*/
   async function boot() {
     setBadge("connexion…", "#7f8c8d");
-    await ensureAuth();
+    const session = await ensureAuth();
+    showLogoutButton(session);
     setBadge("chargement…", "#7f8c8d");
 
     const { count, error } = await sb.from("students").select("*", { count: "exact", head: true });
@@ -418,7 +508,11 @@
   }
 
   // API console pour Damien
-  window.STI2D = { supabase: sb, migrate, syncNow, fetchRemoteState };
+  window.STI2D = {
+    supabase: sb, migrate, syncNow, fetchRemoteState,
+    teacher: () => currentTeacher,
+    logout: () => sb.auth.signOut().then(() => location.reload()),
+  };
 
   boot().catch(e => console.error("[STI2D] Démarrage Supabase :", e));
 })();
