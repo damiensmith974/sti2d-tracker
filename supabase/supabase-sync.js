@@ -80,10 +80,13 @@
     },
     sequences: {
       table: "sequences", pk: ["id"],
+      // assigned_teachers (jsonb) : profs qui font la séquence, ex ["SMITH","HURAUX"]
       toRow: s => ({ id: s.id, title: s.title, ref: s.ref || null, level: s.level || null,
-                     track: s.track || null, competencies: s.competencies || [] }),
+                     track: s.track || null, competencies: s.competencies || [],
+                     assigned_teachers: s.assignedTeachers || [] }),
       fromRow: r => ({ id: r.id, title: r.title, ref: r.ref, level: r.level,
-                       track: r.track, competencies: r.competencies || [] }),
+                       track: r.track, competencies: r.competencies || [],
+                       assignedTeachers: r.assigned_teachers || [] }),
     },
     itProjects: {
       table: "it_projects", pk: ["id"],
@@ -421,6 +424,9 @@
         snapshot[key] = toMap(state[key], TABLES[key]);
       }
       try { originalSaveState(); } catch (e) {}
+      // Si la liste des élèves a changé chez un autre prof, les filtres
+      // Groupe/Élève doivent être reconstruits avant le re-rendu.
+      if (typeof window.populateFilters === "function") window.populateFilters();
       if (typeof window.renderAll === "function") window.renderAll();
       setBadge("mis à jour (autre prof)", "#2980b9");
       setTimeout(() => setBadge("synchronisé", "#27ae60"), 2500);

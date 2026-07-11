@@ -171,6 +171,7 @@ th{position:sticky;top:0;background:#fff;z-index:1;font-size:12px;text-transform
       <button class="tab" data-view="entryView">Saisie</button>
       <button class="tab" data-view="studentView">Fiche élève</button>
       <button class="tab" data-view="classView">Vue classe</button>
+      <button class="tab" data-view="manageStudentsView">Classe</button>
       <button class="tab" data-view="referentialView">Référentiel</button>
     </div>
 
@@ -274,6 +275,48 @@ th{position:sticky;top:0;background:#fff;z-index:1;font-size:12px;text-transform
       </div>
     </section>
 
+    <!-- ================================================================
+         ONGLET "CLASSE" — Gestion complète des élèves (Feature 1)
+         Ajout / modification / suppression, synchronisé via Supabase
+         ================================================================ -->
+    <section id="manageStudentsView" class="view">
+      <div class="two">
+        <!-- Formulaire d'ajout / modification -->
+        <div class="panel">
+          <div class="cardTitle"><h3 id="stuFormTitle">Ajouter un élève</h3><span class="badge" id="stuFormMode">nouveau</span></div>
+          <div class="editorGrid">
+            <div><label>Nom</label><input id="stuNom" placeholder="Ex : PAYET" autocomplete="off"></div>
+            <div><label>Prénom</label><input id="stuPrenom" placeholder="Ex : Léa" autocomplete="off"></div>
+            <div><label>Classe (niveau)</label>
+              <select id="stuLevel"><option value="1STI2D">1STI2D</option><option value="TSTI2D">TSTI2D</option></select>
+            </div>
+            <div><label>Groupe</label><input id="stuGroup" list="stuGroupList" placeholder="Ex : 1STI2D P1" autocomplete="off"><datalist id="stuGroupList"></datalist></div>
+          </div>
+          <!-- Nom complet de l'élève en cours de modification (vide = mode ajout) -->
+          <input type="hidden" id="stuEditingName" value="">
+          <div class="editorActions" style="margin-top:12px;display:flex;gap:8px">
+            <button class="btnSmall" id="stuSaveBtn">Ajouter l'élève</button>
+            <button class="btnSmall" id="stuCancelBtn" style="display:none;background:#64748b">Annuler</button>
+          </div>
+          <div class="inlineHelp">Les élèves sont partagés entre les 4 enseignants : chaque ajout, modification ou
+            suppression est enregistré dans Supabase et visible en temps réel chez les autres profs.</div>
+        </div>
+        <!-- Liste des élèves -->
+        <div class="panel">
+          <div class="cardTitle"><h3>Élèves</h3><span class="badge" id="stuCount">0</span></div>
+          <div class="toolbar" style="margin-bottom:10px">
+            <div><label>Filtrer par groupe</label><select id="stuGroupFilter"></select></div>
+          </div>
+          <div class="tableWrap" style="max-height:540px">
+            <table>
+              <thead><tr><th>Nom</th><th>Prénom</th><th>Niveau</th><th>Groupe</th><th style="width:150px">Actions</th></tr></thead>
+              <tbody id="manageStudentsBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section id="referentialView" class="view">
       <div class="two">
         <div class="panel">
@@ -337,6 +380,8 @@ if(!state.masteryScale) state.masteryScale = seedData.meta.masteryScale;
 if(!state.masteryScale.find(s=>s.key==="N")){
   state.masteryScale.unshift({"key":"N","label":"Non évalué","score":0});
 }
+// Migration: profs assignés par séquence (Feature 2) — tableau toujours présent
+(state.sequences||[]).forEach(s=>{ if(!Array.isArray(s.assignedTeachers)) s.assignedTeachers=[]; });
 // Migration: supprimer les progressions des séquences démarrant après la semaine 35
 (function(){
   const futureIds = (state.ganttItems||[]).filter(x=>x.startWeek>35).map(x=>x.id);
@@ -956,16 +1001,203 @@ function renderReferential(){
       <div class="pillGrid">${p.competencies.map(c=>`<span class="pill" data-label="${competencyLabel(c).replace(/"/g,'&quot;')}">${c}</span>`).join("")}</div>
     </div>
   `));
-  state.sequences.forEach(s=> allCards.push(`
+  state.sequences.forEach(s=>{
+    // --- Feature 2 : profs assignés à la séquence (checkboxes + affichage) ---
+    const assigned = Array.isArray(s.assignedTeachers) ? s.assignedTeachers : [];
+    const profsLine = assigned.length
+      ? `Profs : ${assigned.join(", ")}`
+      : `Profs : <span class="muted">aucun</span>`;
+    const teacherBoxes = ALL_TEACHERS.map(t=>`
+      <label style="display:inline-flex;gap:5px;align-items:center;font-size:12px;font-weight:600;text-transform:none;letter-spacing:0;color:var(--text);cursor:pointer">
+        <input type="checkbox" class="seqTeacherToggle" data-seqid="${s.id}" data-teacher="${t}" ${assigned.includes(t)?'checked':''} style="width:auto"> ${t}
+      </label>`).join("");
+    allCards.push(`
     <div style="padding:12px;border:1px solid var(--line);border-radius:14px;margin-bottom:10px">
       <strong>${s.title}</strong> <span class="badge">${s.level}</span> <span class="badge">${s.track || 'I2D'}</span>
       <div class="small muted" style="margin:6px 0 8px">${s.id}</div>
       <div class="pillGrid">${s.competencies.map(c=>`<span class="pill" data-label="${competencyLabel(c).replace(/"/g,'&quot;')}">${c}</span>`).join("")}</div>
+      <div class="small" style="margin-top:8px"><strong>${profsLine}</strong></div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:4px">${teacherBoxes}</div>
     </div>
-  `));
+  `);});
   document.getElementById("sequenceMap").innerHTML = allCards.join("");
+  // Cocher / décocher un prof -> mise à jour de assignedTeachers + sauvegarde (Supabase via saveState)
+  document.querySelectorAll("#sequenceMap .seqTeacherToggle").forEach(cb=>{
+    cb.addEventListener("change", ()=>{
+      const seq = state.sequences.find(x=>x.id===cb.dataset.seqid);
+      if(!seq) return;
+      if(!Array.isArray(seq.assignedTeachers)) seq.assignedTeachers = [];
+      if(cb.checked){
+        if(!seq.assignedTeachers.includes(cb.dataset.teacher)) seq.assignedTeachers.push(cb.dataset.teacher);
+      } else {
+        seq.assignedTeachers = seq.assignedTeachers.filter(t=>t!==cb.dataset.teacher);
+      }
+      saveState();          // localStorage + push différentiel vers Supabase
+      renderReferential();  // rafraîchit la ligne "Profs : …"
+    });
+  });
 }
 
+
+/* ============================================================================
+ * ONGLET "CLASSE" — GESTION COMPLÈTE DES ÉLÈVES (Feature 1)
+ * Ajout / modification / suppression. Toute écriture passe par saveState(),
+ * qui est enveloppé par supabase-sync.js -> persistance table `students`
+ * + synchro temps réel entre les 4 profs.
+ * ==========================================================================*/
+
+// Les 4 enseignants de l'équipe (utilisé aussi par les séquences, Feature 2)
+const ALL_TEACHERS = ["SMITH","HURAUX","THIAW-WOAYE","NATIVEL"];
+
+// Échappement HTML pour les valeurs insérées dans les attributs / cellules
+function escHtml(s){ return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;"); }
+
+// Les élèves sont stockés sous la forme "NOM Prénom" (ex "PAYET HOAREAU Léa").
+// On sépare : les mots entièrement en MAJUSCULES au début = nom de famille.
+function splitStudentName(full){
+  const parts=(full||"").trim().split(/\s+/).filter(Boolean);
+  const nom=[], prenom=[]; let inPrenom=false;
+  parts.forEach(p=>{
+    if(!inPrenom && p===p.toLocaleUpperCase('fr') && /[A-ZÀ-Þ]/.test(p)) nom.push(p);
+    else { inPrenom=true; prenom.push(p); }
+  });
+  if(!nom.length && parts.length){ return { nom:parts[0], prenom:parts.slice(1).join(" ") }; }
+  return { nom:nom.join(" "), prenom:prenom.join(" ") };
+}
+
+// Renommage : propage le nouveau nom dans TOUTES les structures liées
+// (progressions, évaluations manuelles, prefill) pour ne rien perdre.
+function renameStudentEverywhere(oldName, newName){
+  (state.progressions||[]).forEach(p=>{ if(p.student===oldName) p.student=newName; });
+  (state.manual||[]).forEach(m=>{ if(m.student===oldName) m.student=newName; });
+  (state.prefill||[]).forEach(p=>{ if(p.student===oldName) p.student=newName; });
+}
+
+// Garantit une ligne prefill par compétence pour l'élève : indispensable pour
+// que la fiche élève / vue classe affichent toutes ses compétences.
+function ensurePrefillForStudent(stu){
+  (state.competencies||[]).forEach(c=>{
+    let row = state.prefill.find(p=>p.student===stu.name && p.competencyCode===c.code);
+    if(!row){ row = { student:stu.name, competencyCode:c.code, score:null, status:"N" }; state.prefill.push(row); }
+    row.group = stu.group; row.level = stu.level;   // groupe/niveau toujours à jour
+  });
+}
+
+// Remet le formulaire en mode "ajout"
+function resetStudentForm(){
+  document.getElementById("stuEditingName").value = "";
+  document.getElementById("stuNom").value = "";
+  document.getElementById("stuPrenom").value = "";
+  document.getElementById("stuGroup").value = "";
+  document.getElementById("stuFormTitle").textContent = "Ajouter un élève";
+  document.getElementById("stuFormMode").textContent = "nouveau";
+  document.getElementById("stuSaveBtn").textContent = "Ajouter l'élève";
+  document.getElementById("stuCancelBtn").style.display = "none";
+}
+
+// Pré-remplit le formulaire pour modifier un élève existant
+function editStudent(name){
+  const stu = state.students.find(s=>s.name===name); if(!stu) return;
+  const {nom, prenom} = splitStudentName(stu.name);
+  document.getElementById("stuEditingName").value = stu.name;
+  document.getElementById("stuNom").value = nom;
+  document.getElementById("stuPrenom").value = prenom;
+  document.getElementById("stuLevel").value = stu.level || "1STI2D";
+  document.getElementById("stuGroup").value = stu.group || "";
+  document.getElementById("stuFormTitle").textContent = "Modifier : " + stu.name;
+  document.getElementById("stuFormMode").textContent = "modification";
+  document.getElementById("stuSaveBtn").textContent = "Enregistrer";
+  document.getElementById("stuCancelBtn").style.display = "";
+  document.getElementById("stuNom").focus();
+}
+
+// Ajout OU modification selon le champ caché stuEditingName
+function saveStudentForm(){
+  const nom = document.getElementById("stuNom").value.trim().toLocaleUpperCase('fr');
+  const prenom = document.getElementById("stuPrenom").value.trim();
+  const level = document.getElementById("stuLevel").value;
+  const group = document.getElementById("stuGroup").value.trim() || level;
+  const editingName = document.getElementById("stuEditingName").value;
+  if(!nom || !prenom){ alert("Le nom et le prénom sont obligatoires."); return; }
+  const newName = nom + " " + prenom;
+
+  if(editingName){
+    // ----- MODIFICATION -----
+    const stu = state.students.find(s=>s.name===editingName);
+    if(!stu){ resetStudentForm(); return; }
+    if(newName!==editingName && state.students.some(s=>s.name===newName)){
+      alert("Un élève nommé « " + newName + " » existe déjà."); return;
+    }
+    if(newName!==editingName) renameStudentEverywhere(editingName, newName);
+    stu.name = newName; stu.level = level; stu.group = group;
+    ensurePrefillForStudent(stu);
+  } else {
+    // ----- AJOUT -----
+    if(state.students.some(s=>s.name===newName)){
+      alert("Un élève nommé « " + newName + " » existe déjà."); return;
+    }
+    const stu = { name:newName, level, group };
+    state.students.push(stu);
+    ensurePrefillForStudent(stu);
+  }
+  saveState();          // localStorage + Supabase (students, prefill, progressions…)
+  resetStudentForm();
+  populateFilters();
+  renderAll();
+}
+
+// Suppression (avec confirmation) : nettoie aussi les données liées.
+// Côté Supabase, les FK "on delete cascade" suppriment le reste automatiquement.
+function deleteStudent(name){
+  if(!window.confirm("Supprimer l'élève « " + name + " » ?\n\nSes progressions et évaluations seront également supprimées (pour les 4 profs).")) return;
+  state.students = state.students.filter(s=>s.name!==name);
+  state.progressions = (state.progressions||[]).filter(p=>p.student!==name);
+  state.manual = (state.manual||[]).filter(m=>m.student!==name);
+  state.prefill = (state.prefill||[]).filter(p=>p.student!==name);
+  if(document.getElementById("stuEditingName").value===name) resetStudentForm();
+  saveState();
+  populateFilters();
+  renderAll();
+}
+
+// Affiche la liste (filtrable par groupe) + boutons Modifier / Supprimer
+function renderManageStudents(){
+  const body = document.getElementById("manageStudentsBody");
+  if(!body) return;
+  // Filtre par groupe (on conserve la sélection courante lors des re-rendus)
+  const filterSel = document.getElementById("stuGroupFilter");
+  const cur = filterSel.value || "Tous les groupes";
+  const gs = groups();
+  filterSel.innerHTML = gs.map(g=>`<option>${escHtml(g)}</option>`).join("");
+  filterSel.value = gs.includes(cur) ? cur : "Tous les groupes";
+  // Datalist des groupes existants pour le formulaire
+  document.getElementById("stuGroupList").innerHTML =
+    gs.slice(1).map(g=>`<option value="${escHtml(g)}"></option>`).join("");
+  // Liste triée : groupe puis nom
+  const list = studentsForGroup(filterSel.value)
+    .slice().sort((a,b)=> (a.group||"").localeCompare(b.group||"",'fr') || a.name.localeCompare(b.name,'fr'));
+  document.getElementById("stuCount").textContent = list.length + " élève(s)";
+  body.innerHTML = list.length ? list.map(s=>{
+    const {nom, prenom} = splitStudentName(s.name);
+    return `<tr>
+      <td><strong>${escHtml(nom)}</strong></td>
+      <td>${escHtml(prenom)}</td>
+      <td><span class="badge">${escHtml(s.level)}</span></td>
+      <td>${escHtml(s.group||"")}</td>
+      <td>
+        <button class="btnSmall stuEditBtn" data-name="${escHtml(s.name)}">Modifier</button>
+        <button class="btnSmall stuDelBtn" data-name="${escHtml(s.name)}" style="background:#dc2626">Suppr.</button>
+      </td>
+    </tr>`;
+  }).join("") : `<tr><td colspan="5" class="muted">Aucun élève dans ce groupe.</td></tr>`;
+  body.querySelectorAll(".stuEditBtn").forEach(b=>b.addEventListener("click", ()=>editStudent(b.dataset.name)));
+  body.querySelectorAll(".stuDelBtn").forEach(b=>b.addEventListener("click", ()=>deleteStudent(b.dataset.name)));
+}
+
+// Événements du formulaire (attachés une seule fois au chargement)
+document.getElementById("stuSaveBtn").addEventListener("click", saveStudentForm);
+document.getElementById("stuCancelBtn").addEventListener("click", resetStudentForm);
+document.getElementById("stuGroupFilter").addEventListener("change", renderManageStudents);
 
 function statusLabel(key){ return {R:'Rouge',O:'Orange',Y:'Jaune',G:'Vert'}[key]||key; }
 function statusColorVar(key){ return {R:'var(--red)',O:'var(--orange)',Y:'var(--yellow)',G:'var(--green)'}[key]||'#ccc'; }
@@ -1105,7 +1337,7 @@ function renderEntryGantt(){
     });
   });
 }
-function renderAll(){ renderGantt(); renderEntryGantt(); renderLegend(); renderEntry(); renderStudent(); renderClass(); renderReferential(); }
+function renderAll(){ renderGantt(); renderEntryGantt(); renderLegend(); renderEntry(); renderStudent(); renderClass(); renderReferential(); renderManageStudents(); }
 
 document.querySelectorAll(".tab").forEach(btn=>btn.addEventListener("click", ()=>{ document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active")); document.querySelectorAll(".view").forEach(x=>x.classList.remove("active")); btn.classList.add("active"); document.getElementById(btn.dataset.view).classList.add("active"); if(btn.dataset.view==="entryView") renderEntryGantt(); }));
 ["groupFilter","studentFilter"].forEach(id=>{ document.getElementById(id).addEventListener("change", ()=>{ if(id==="groupFilter") populateFilters(); renderAll(); }); });

@@ -90,6 +90,7 @@ create table if not exists public.sequences (
   level         text,                         -- "1STI2D" | "TSTI2D"
   track         text,                         -- "I2D" | "IT" | ...
   competencies  text[] not null default '{}', -- ["CO1.1","CO1.3",...]
+  assigned_teachers jsonb not null default '[]'::jsonb, -- ["SMITH","HURAUX"] : profs qui font la séquence
   updated_at    timestamptz not null default now()
 );
 create index if not exists idx_sequences_level on public.sequences(level);
