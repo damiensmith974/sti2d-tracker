@@ -147,8 +147,6 @@ th{position:sticky;top:0;background:#fff;z-index:1;font-size:12px;text-transform
 .statusDetailPanel .detailItem{padding:6px 10px;border-bottom:1px solid #f3f4f6;font-size:13px;display:flex;justify-content:space-between;align-items:center}
 .statusDetailPanel .detailItem:last-child{border-bottom:none}
 </style>
-<!-- Conteneur de sauvegarde portable — rempli par le bouton 💾, lu au chargement -->
-<script type="application/json" id="sti2d-state-data"></script>
 </head>
 <body>
 <header style="display:flex;align-items:center;justify-content:space-between;padding:14px 22px">
@@ -159,7 +157,6 @@ th{position:sticky;top:0;background:#fff;z-index:1;font-size:12px;text-transform
       <p style="margin:2px 0 0;font-size:13px;opacity:.85">Damien Smith — Lycée Polyvalent Gérard Ethève</p>
     </div>
   </div>
-  <button onclick="saveToHtmlFile()" title="Sauvegarder dans le fichier" style="background:none;border:none;color:rgba(255,255,255,0.6);cursor:pointer;font-size:20px;padding:4px 8px;line-height:1;transition:color .2s" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='rgba(255,255,255,0.6)'">💾</button>
 </header>
 
 <div class="wrap">
@@ -310,26 +307,10 @@ const seedData = {"meta": {"title": "Suivi des compétences STI2D", "yearLabel":
 const STORAGE_KEY = "sti2d-tracker-html-v13";
 function clone(x){ return JSON.parse(JSON.stringify(x)); }
 function loadState(){
-  // Lire l'état embarqué dans le fichier (rempli par 💾)
-  var embedded = null;
-  try{
-    var el=document.getElementById('sti2d-state-data');
-    if(el && el.textContent.trim()) embedded=JSON.parse(el.textContent);
-  }catch(e){}
-
   // Lire le localStorage
   var lsState = null;
   try{ var s=localStorage.getItem(STORAGE_KEY); if(s) lsState=JSON.parse(s); }catch(e){}
-
-  // Priorité : le plus récent entre localStorage et l'état embarqué
-  if(lsState && embedded){
-    var lsTime = lsState._savedAt || 0;
-    var embTime = embedded._savedAt || 0;
-    if(embTime > lsTime) return embedded;
-    return lsState;
-  }
   if(lsState) return lsState;
-  if(embedded) return embedded;
 
   // Fallback : seedData
   const d=clone(seedData);
@@ -435,84 +416,6 @@ saveState();
   }
 })();
 function saveState(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
-
-function saveToHtmlFile(){
-  state._savedAt = Date.now();
-  saveState();
-  var stateJson = JSON.stringify(state);
-  // Encodage sûr pour insertion dans balise script HTML
-  var safeJson = stateJson.replace(/</g,'\\u003c').replace(/>/g,'\\u003e');
-
-  // === Étape 1 : obtenir le HTML de la page via outerHTML ===
-  var html = document.documentElement.outerHTML;
-
-  // === Étape 2 : injecter l'état dans le conteneur dédié ===
-  // Ce conteneur est type="application/json" donc non exécuté, préservé tel quel
-  var openTag = 'id="sti2d-state-data">';
-  var si = html.indexOf(openTag);
-  if(si !== -1){
-    var cs = si + openTag.length;
-    var ce = html.indexOf('<\/script>', cs);
-    if(ce !== -1) html = html.slice(0, cs) + safeJson + html.slice(ce);
-  }
-
-  // === Étape 3 : remplacer le contenu du script principal ===
-  // outerHTML peut encoder < en &lt; dans les scripts, cassant le JS.
-  // On lit le JS brut depuis le DOM (textContent = source réelle, jamais encodée)
-  // puis on le réinsère proprement dans le HTML.
-  var mainScriptEl = null;
-  document.querySelectorAll('script').forEach(function(s){
-    if(!s.type && s.textContent.indexOf('const seedData')!==-1) mainScriptEl=s;
-  });
-  if(mainScriptEl){
-    // Mettre à jour seedData dans le JS brut
-    var js = mainScriptEl.textContent;
-    var marker = 'const seedData = ';
-    var mi = js.indexOf(marker);
-    if(mi !== -1){
-      var ms = mi + marker.length;
-      var depth=0, me=ms, inStr=false, esc=false;
-      for(var j=ms;j<js.length;j++){
-        var c=js[j];
-        if(esc){esc=false;continue;}
-        if(c==='\\'&&inStr){esc=true;continue;}
-        if(c==='"'){inStr=!inStr;continue;}
-        if(inStr)continue;
-        if(c==='{'){depth++;}
-        else if(c==='}'){depth--;if(depth===0){me=j+1;break;}}
-      }
-      if(me>ms) js = js.slice(0,ms) + safeJson + js.slice(me);
-    }
-    // Localiser le script principal dans le HTML via son marqueur de début unique
-    var scriptOpen = '<script>';
-    var scriptMarker = 'const seedData';
-    var pos = -1;
-    var searchFrom = 0;
-    while(true){
-      var p = html.indexOf(scriptOpen, searchFrom);
-      if(p===-1) break;
-      var after = html.slice(p+scriptOpen.length, p+scriptOpen.length+200).replace(/\s/g,'');
-      if(after.indexOf('constseedData')===0){ pos=p; break; }
-      searchFrom = p+1;
-    }
-    if(pos !== -1){
-      var scriptStart = pos + scriptOpen.length;
-      var scriptEnd = html.indexOf('<\/script>', scriptStart);
-      if(scriptEnd !== -1) html = html.slice(0, scriptStart) + js + html.slice(scriptEnd);
-    }
-  }
-
-  var newHtml = '<!DOCTYPE html>\n' + html;
-  var fname = decodeURIComponent((location.pathname.split('/').pop()||'suivi_competences_sti2d_v14.html').split('?')[0]);
-  var blob = new Blob([newHtml], {type:'text/html;charset=utf-8'});
-  var a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = fname;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
-}
 
 function groups(){ return ["Tous les groupes", ...Array.from(new Set(state.students.map(s=>s.group))).sort((a,b)=>a.localeCompare(b,'fr'))]; }
 function selected(){ return { group:document.getElementById("groupFilter").value, student:document.getElementById("studentFilter").value }; }
@@ -1254,4 +1157,4 @@ document.getElementById('ganttEditToggle').addEventListener('change', function()
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="supabase/supabase-sync.js"></script>
 </body>
-</html>
+</html>                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
