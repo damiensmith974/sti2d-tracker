@@ -657,17 +657,40 @@
     } else {
       title.textContent = "Choisir une séquence";
       const stu = (state.students || []).find(s => s.name === q.student);
-      let items = (state.ganttItems || []).slice().sort((a, b) => a.startWeek - b.startWeek);
+      // Tri et regroupement par dominante : IT → I2D → 2I2D → SIN → ITEC
+      const DOM_ORDER = ["IT", "I2D", "2I2D", "SIN", "ITEC"];
+      const DOM_ICONS = { "IT": "🔴", "I2D": "🔵", "2I2D": "🟢", "SIN": "🟣", "ITEC": "🟠" };
+      const qeDominante = (gi, d) => {
+        if (d && (d.dominante || d.track)) return d.dominante || d.track;
+        const row = gi.row || "";
+        if (row.indexOf("TSTI2D") === 0) return "2I2D";
+        const parts = row.split(" ");
+        return parts.length > 1 ? parts.slice(1).join(" ") : (row || "Autre");
+      };
+      let items = (state.ganttItems || []).slice();
       if (stu && stu.level) items = items.filter(x => x.row.startsWith(stu.level)); // niveau de l'élève
-      let html = "", lastRow = null;
+      const entries = [];
       items.forEach(gi => {
         const d = qeFindDetail(gi.id);
         if (!d) return;
-        if (gi.row !== lastRow) { lastRow = gi.row; html += '<div class="qeSheetGroup">' + qeEsc(gi.row) + "</div>"; }
-        const n = (d.competencies || []).length;
-        html += '<button type="button" class="qeSheetItem' + (q.sequence === gi.id ? " qeSelected" : "") +
-          '" data-pick-sequence="' + qeEsc(gi.id) + '"><span>' + qeEsc(d.title) +
-          "</span><small>" + qeEsc(gi.id) + " · " + n + " comp.</small></button>";
+        entries.push({ gi: gi, d: d, dom: qeDominante(gi, d) });
+      });
+      entries.sort((a, b) => {
+        const oa = DOM_ORDER.indexOf(a.dom), ob = DOM_ORDER.indexOf(b.dom);
+        return (oa === -1 ? DOM_ORDER.length : oa) - (ob === -1 ? DOM_ORDER.length : ob) ||
+          a.dom.localeCompare(b.dom, "fr") ||
+          a.gi.startWeek - b.gi.startWeek;
+      });
+      let html = "", lastDom = null;
+      entries.forEach(e => {
+        if (e.dom !== lastDom) {
+          lastDom = e.dom;
+          html += '<div class="qeSheetGroup">' + (DOM_ICONS[e.dom] || "⚪") + " " + qeEsc(e.dom) + "</div>";
+        }
+        const n = (e.d.competencies || []).length;
+        html += '<button type="button" class="qeSheetItem' + (q.sequence === e.gi.id ? " qeSelected" : "") +
+          '" data-pick-sequence="' + qeEsc(e.gi.id) + '"><span>' + qeEsc(e.d.title) +
+          "</span><small>" + qeEsc(e.gi.id) + " · " + n + " comp.</small></button>";
       });
       body.innerHTML = html || '<div class="qeHint">' +
         (stu && stu.level ? "Aucune séquence pour le niveau " + qeEsc(stu.level) + "." : "Aucune séquence.") + "</div>";

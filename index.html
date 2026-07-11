@@ -100,8 +100,6 @@ th{position:sticky;top:0;background:#fff;z-index:1;font-size:12px;text-transform
 .ganttBlockCompact{position:absolute;top:28px;height:72px;border-radius:16px;color:#fff;padding:8px 24px 8px 12px;font-size:12px;font-weight:700;box-shadow:var(--shadow);display:flex;flex-direction:column;align-items:flex-start;justify-content:center;cursor:pointer;overflow:hidden;transition:opacity .15s}
 .ganttBlockCompact:hover{opacity:.85}
 .ganttBlockCompact.selected{outline:3px solid rgba(17,24,39,.5);opacity:1}
-.entryGanttWrap{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:#fff;margin-bottom:14px}
-.entryGanttWrap .ganttTrack{min-height:102px}
 .miniStack{height:14px;border-radius:999px;overflow:hidden;display:flex;background:#eef2f7;border:1px solid var(--line)}
 .progressTable td{text-align:center}
 .dot{display:inline-block;width:18px;height:18px;border-radius:999px;border:1px solid rgba(0,0,0,.08)}
@@ -217,7 +215,6 @@ th{position:sticky;top:0;background:#fff;z-index:1;font-size:12px;text-transform
 
     <div class="tabs">
       <button class="tab active" data-view="calendarView">Gantt annuel</button>
-      <button class="tab" data-view="entryView">Saisie</button>
       <button class="tab" data-view="quickEntryView">⚡ Saisie rapide</button>
       <button class="tab" data-view="studentView">Fiche élève</button>
       <button class="tab" data-view="classView">Vue classe</button>
@@ -253,34 +250,6 @@ th{position:sticky;top:0;background:#fff;z-index:1;font-size:12px;text-transform
       </div>
     </section>
 
-    <section id="entryView" class="view">
-      <div class="entryGanttWrap">
-        <div class="ganttMonths">
-          <div class="ganttLabel">Mois</div>
-          <div class="ganttMonthsTrack" id="entryGanttMonths"></div>
-        </div>
-        <div class="ganttHeader">
-          <div class="ganttLabel">Classe</div>
-          <div class="ganttWeeks" id="entryGanttWeeks"></div>
-        </div>
-        <div id="entryGanttRows"></div>
-      </div>
-      <div class="two">
-        <div class="panel">
-          <div class="cardTitle"><h3>Saisie manuelle des compétences</h3><div class="legend" id="legend"></div></div>
-          <div class="tableWrap">
-            <table>
-              <thead><tr><th>Code</th><th>Compétence</th><th>État</th></tr></thead>
-              <tbody id="entryBody"></tbody>
-            </table>
-          </div>
-        </div>
-        <div class="panel">
-          <div class="cardTitle"><h3>Élément sélectionné</h3></div>
-          <div id="entryInfo"></div>
-        </div>
-      </div>
-    </section>
 
     <!-- ================================================================
          ONGLET "SAISIE RAPIDE" — saisie tactile en classe (mobile)
@@ -636,7 +605,6 @@ function populateFilters(){
   s.innerHTML = ["Tous les élèves", ...st].map(x=>`<option>${x}</option>`).join("");
   s.value = [...s.options].some(o=>o.value===curS)?curS:"Tous les élèves";
 }
-function renderLegend(){ document.getElementById("legend").innerHTML = seedData.meta.masteryScale.map(s=>`<span class="${statusClass(s.key)}">${s.label}</span>`).join(""); }
 
 function weekList(){
   const arr=[]; const start=new Date(state.calendarConfig.schoolYearStart+"T12:00:00");
@@ -840,62 +808,15 @@ function attachGanttEvents(){
     };
     const stop=()=>{ mode=null; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", stop); };
     block.addEventListener("mousedown", (e)=>{
-      if(!ganttEditMode) { state.selectedSequenceId=block.dataset.id; saveState(); renderGantt(); renderEntry(); return; }
+      if(!ganttEditMode) { state.selectedSequenceId=block.dataset.id; saveState(); renderGantt(); return; }
       e.preventDefault();
       const item=state.ganttItems.find(x=>x.id===block.dataset.id);
       trackRect=block.parentElement.getBoundingClientRect(); startX=e.clientX; startWeek=item.startWeek; startDur=item.duration;
       mode=e.target.classList.contains("resize") ? "resize" : "drag";
       window.addEventListener("mousemove", onMove); window.addEventListener("mouseup", stop);
     });
-    block.addEventListener("click", ()=>{ state.selectedSequenceId=block.dataset.id; saveState(); renderGantt(); renderEntry(); });
+    block.addEventListener("click", ()=>{ state.selectedSequenceId=block.dataset.id; saveState(); renderGantt(); });
   });
-}
-
-function renderEntry(){
-  const st=selected(), body=document.getElementById("entryBody"), info=document.getElementById("entryInfo");
-  if(st.student==="Tous les élèves"){ body.innerHTML=`<tr><td colspan="3" class="muted">Sélectionne un élève pour saisir ou consulter le détail.</td></tr>`; info.innerHTML=`<p class="muted">Choisis un élève.</p>`; return; }
-  const detail = findSelectedDetail();
-  // Séquence future ?
-  const gi = detail ? state.ganttItems.find(x=>x.id===detail.id) : null;
-  const isFuture = gi && gi.startWeek >= currentWeekIndex();
-  let codes = detail ? (detail.competencies || []).slice() : [...new Set(state.prefill.filter(p=>p.student===st.student).map(p=>p.competencyCode))];
-  body.innerHTML = codes.sort((a,b)=>a.localeCompare(b,'fr')).map(code=>{
-    // Priorité : progression par séquence > valeur manuelle globale > prefill > défaut
-    const seqProg = detail ? progressionFor(st.student, code, detail.id) : null;
-    // Si une séquence est sélectionnée : progression spécifique, sinon N (pas de défaut jaune)
-    // Si pas de séquence : valeur globale manuelle/prefill, sinon N
-    const val = detail
-      ? (seqProg || {status: "N"})
-      : (manualValue(st.student, code) || prefillFor(st.student, code) || {status: "N"});
-    return `<tr>
-      <td><span class="compCode" data-label="${competencyLabel(code).replace(/"/g,'&quot;')}"><strong>${code}</strong></span></td>
-      <td>${competencyLabel(code)}</td>
-      <td>
-        <select class="manualSelect" data-student="${st.student}" data-code="${code}" ${isFuture?'style="opacity:.5"':''}>
-          ${seedData.meta.masteryScale.map(s=>`<option value="${s.key}" ${val.status===s.key?'selected':''}>${s.key} — ${s.label}</option>`).join("")}
-        </select>
-      </td>
-    </tr>`;
-  }).join("");
-  if(detail){
-    const mei = detail.mei ? `<p class="muted">Dominante : ${detail.mei}</p>` : "";
-    const prob = detail.problem ? `<p>${detail.problem}</p>` : "";
-    const futureNote = isFuture ? `<p class="muted" style="color:#94a3b8;font-style:italic">⏳ Séquence à venir — compétences non évaluées</p>` : "";
-    info.innerHTML = `<p><strong>${detail.title}</strong></p>${futureNote}${mei}${prob}<div class="pillGrid" style="margin-top:10px">${(detail.competencies||[]).map(c=>`<span class="pill" data-label="${competencyLabel(c).replace(/"/g,'&quot;')}">${c}</span>`).join("")}</div>`;
-  } else info.innerHTML = `<p class="muted">Aucun élément sélectionné.</p>`;
-  document.querySelectorAll(".manualSelect").forEach(el=>el.addEventListener("change", ()=>{
-    const scoreMap={N:0,R:1,O:2,Y:3,G:4};
-    if(detail){
-      // Sauvegarder la progression par séquence
-      const existing = state.progressions.find(p=>p.student===el.dataset.student && p.competencyCode===el.dataset.code && p.itemId===detail.id);
-      if(existing){ existing.status=el.value; } else { state.progressions.push({student:el.dataset.student, competencyCode:el.dataset.code, itemId:detail.id, status:el.value}); }
-    } else {
-      // Sauvegarder la valeur manuelle globale
-      const cur=manualValue(el.dataset.student, el.dataset.code)||{student:el.dataset.student, competencyCode:el.dataset.code};
-      cur.status=el.value; cur.score=scoreMap[el.value]||0; upsertManual(cur);
-    }
-    saveState(); renderStudent(); renderClass();
-  }));
 }
 
 function renderStudentProgression(studentName){
@@ -1386,39 +1307,9 @@ function showStudentStatusDetail(statusKey, studentName){
   });
 }
 
-function renderEntryGantt(){
-  const segs=monthSegments();
-  document.getElementById("entryGanttMonths").innerHTML=segs.map(seg=>`<div style="grid-column:${seg.start} / span ${seg.end-seg.start+1}">${seg.label}</div>`).join("");
-  const weeks=weekList();
-  document.getElementById("entryGanttWeeks").innerHTML=weeks.map(w=>`<div class="${inHoliday(w.date)?'holiday':''} ${isCurrentWeek(w.date)?'current-week':''}">${w.week}</div>`).join("");
-  document.getElementById("entryGanttRows").innerHTML=seedData.ganttRows.map(row=>{
-    const cells=weeks.map(w=>`<div class="cell ${inHoliday(w.date)?'holiday':''} ${isCurrentWeek(w.date)?'current-week':''}"></div>`).join("");
-    const blocks=state.ganttItems.filter(x=>x.row===row).map(item=>{
-      const left=((item.startWeek-1)/46)*100, width=(item.duration/46)*100;
-      const sel=item.id===state.selectedSequenceId;
-      const title=ganttTitleById(item.id);
-      return `<div class="ganttBlockCompact ${sel?'selected':''}" data-row="${row}" data-id="${item.id}" style="left:${left}%;width:${width}%" title="${title.replace(/"/g,'&quot;')}">
-        <span style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${title}</span>
-        <small style="opacity:.75;font-size:10px">${item.id}</small>
-      </div>`;
-    }).join("");
-    return `<div class="ganttRow">
-      <div class="ganttLabel">${row}</div>
-      <div class="ganttTrack" data-row="${row}">${cells}${blocks}</div>
-    </div>`;
-  }).join("");
-  document.querySelectorAll(".ganttBlockCompact").forEach(block=>{
-    block.addEventListener("click",()=>{
-      state.selectedSequenceId=block.dataset.id;
-      saveState();
-      renderEntryGantt();
-      renderEntry();
-    });
-  });
-}
-function renderAll(){ renderGantt(); renderEntryGantt(); renderLegend(); renderEntry(); renderStudent(); renderClass(); renderReferential(); renderManageStudents(); }
+function renderAll(){ renderGantt(); renderStudent(); renderClass(); renderReferential(); renderManageStudents(); }
 
-document.querySelectorAll(".tab").forEach(btn=>btn.addEventListener("click", ()=>{ document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active")); document.querySelectorAll(".view").forEach(x=>x.classList.remove("active")); btn.classList.add("active"); document.getElementById(btn.dataset.view).classList.add("active"); if(btn.dataset.view==="entryView") renderEntryGantt(); }));
+document.querySelectorAll(".tab").forEach(btn=>btn.addEventListener("click", ()=>{ document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active")); document.querySelectorAll(".view").forEach(x=>x.classList.remove("active")); btn.classList.add("active"); document.getElementById(btn.dataset.view).classList.add("active"); }));
 ["groupFilter","studentFilter"].forEach(id=>{ document.getElementById(id).addEventListener("change", ()=>{ if(id==="groupFilter") populateFilters(); renderAll(); }); });
 
 populateFilters();
